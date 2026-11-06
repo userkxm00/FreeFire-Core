@@ -1,22 +1,19 @@
 @echo off
-chcp 65001 >nul
+title Uploading FreeFire-Core to GitHub
+echo ========================================================
+echo Pushing to GitHub: https://github.com/userkxm00/FreeFire-Core.git
+echo ========================================================
 echo.
-echo ================================================================
-echo 🚀 جاري رفع المشروع إلى GitHub: userkxm00/FreeFire-Core
-echo ================================================================
-echo.
-
 "C:\Program Files\Git\cmd\git.exe" push -u origin main
-
+echo.
 if %ERRORLEVEL% EQU 0 (
-    echo.
-    echo ✅ تم رفع المشروع بنجاح إلى المستودع:
-    echo 🔗 https://github.com/userkxm00/FreeFire-Core
-    echo.
+    echo ========================================================
+    echo SUCCESS! Project uploaded to GitHub successfully.
+    echo ========================================================
 ) else (
-    echo.
-    echo ❌ حدث خطأ أو مطلوب تسجيل الدخول إلى GitHub في المتصفح.
-    echo.
+    echo ========================================================
+    echo Error or Browser Authorization needed.
+    echo ========================================================
 )
-
+echo.
 pause
