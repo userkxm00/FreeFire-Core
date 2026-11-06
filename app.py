@@ -12,6 +12,7 @@ import base64
 import time
 import hashlib
 import hmac
+import secrets
 import os
 import threading
 from datetime import datetime, date
@@ -59,15 +60,38 @@ def require_api_key_configured():
 # Enforce immediately upon module import/initialization (covers direct run, WSGI, and Vercel)
 API_KEY = require_api_key_configured()
 
-# 🔐 Session Configuration for Secure Dashboard Authentication (HttpOnly, SameSite)
+# 🔐 Session Configuration for Secure Dashboard Authentication (HttpOnly, SameSite, Secure)
 SESSION_SECRET = os.getenv("SESSION_SECRET")
-if not SESSION_SECRET:
-    SESSION_SECRET = hashlib.sha256(f"ff-core-session::{API_KEY}".encode()).hexdigest()
+if not SESSION_SECRET or not str(SESSION_SECRET).strip():
+    # Cryptographically secure independent random secret (never derived from API_KEY)
+    SESSION_SECRET = secrets.token_hex(32)
+    app.logger.warning(
+        "SESSION_SECRET is not configured in environment. Generated an ephemeral in-memory secret. "
+        "Set SESSION_SECRET in .env or environment variables for persistent sessions across restarts."
+    )
 app.secret_key = SESSION_SECRET
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-if os.getenv("COOKIE_SECURE", "false").lower() in ("1", "true", "yes"):
-    app.config["SESSION_COOKIE_SECURE"] = True
+
+# Auto-detect HTTPS/Production or explicit COOKIE_SECURE
+_is_production = (
+    os.getenv("VERCEL") == "1"
+    or os.getenv("ENV", "").lower() == "production"
+    or os.getenv("FLASK_ENV", "").lower() == "production"
+)
+_cookie_secure_env = os.getenv("COOKIE_SECURE")
+if _cookie_secure_env is not None:
+    app.config["SESSION_COOKIE_SECURE"] = _cookie_secure_env.lower() in ("1", "true", "yes")
+else:
+    app.config["SESSION_COOKIE_SECURE"] = _is_production
+
+# ☁️ Vercel Architecture Warning
+if os.getenv("VERCEL") == "1":
+    app.logger.warning(
+        "FreeFire-Core is executing in Vercel serverless environment. "
+        "Local filesystem writes (usage_state.json, token_*.json) are ephemeral and do not persist across requests. "
+        "For persistent production deployment, an external database (such as Upstash Redis or Supabase) must be configured."
+    )
 
 # 🌐 Configurable SSL verification (enabled by default for security)
 VERIFY_SSL = os.getenv("VERIFY_SSL", "true").lower() in {"1", "true", "yes"}
@@ -173,6 +197,40 @@ def is_request_authenticated(provided_key=None):
 
 # Backward-compatible alias
 key_ok = is_request_authenticated
+
+
+def get_or_create_csrf_token():
+    """Ensure a cryptographically random CSRF token exists in the session and return it."""
+    if "csrf_token" not in session:
+        session["csrf_token"] = secrets.token_hex(16)
+    return session["csrf_token"]
+
+
+def validate_csrf_token():
+    """
+    Validate CSRF token for state-modifying requests (POST, PUT, DELETE)
+    made using browser session authentication.
+
+    Requests authenticated with API Key headers (X-API-Key, Bearer) are immune to CSRF
+    and do not require CSRF token validation.
+    """
+    # API clients authenticating via headers are immune to CSRF
+    if request.headers.get("X-API-Key") or request.headers.get("Authorization"):
+        return True
+
+    # Browser sessions: enforce CSRF validation
+    if session.get("authenticated") is True:
+        token = (
+            request.headers.get("X-CSRF-Token")
+            or request.form.get("csrf_token")
+            or (request.get_json(silent=True) or {}).get("csrf_token")
+        )
+        session_token = session.get("csrf_token")
+        if not token or not session_token or not hmac.compare_digest(str(token), str(session_token)):
+            return False
+        return True
+
+    return True
 
 
 def validate_uid(uid_str):
@@ -498,6 +556,7 @@ LOGIN_GATE_HTML = """<!DOCTYPE html>
         <p>أدخل مفتاح الـ API للوصول. يتم الإرسال عبر طلب POST مشفر دون تسريب المفتاح في الروابط.</p>
         {% endif %}
         <form method="POST" action="/login">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <input type="password" name="key" placeholder="أدخل مفتاح الـ API هنا..." required autofocus>
             <button type="submit">فتح لوحة التحكم</button>
         </form>
@@ -511,6 +570,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token }}">
     <title>Free Fire Like & Token Manager - ARAFAT FLEX</title>
     <style>
         :root {
@@ -647,6 +707,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
                 <span class="badge badge-green">🔒 جلسة ويب مشفرة وآمنة (HttpOnly Cookie)</span>
                 <form method="POST" action="/logout" style="margin:0;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                     <button type="submit" style="background:#21262d; border:1px solid #30363d; color:#c9d1d9; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:0.85rem; width:auto; margin:0;">تسجيل الخروج 🚪</button>
                 </form>
             </div>
@@ -751,6 +812,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <script>
         // Secure Session Auth: Browser transmits HttpOnly session cookies automatically.
         // No API keys are embedded or accessible in JavaScript or HTML.
+        const CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+
         async function loadStats() {
             try {
                 const res = await fetch('/tokens/status');
@@ -814,7 +877,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             try {
                 const response = await fetch('/tokens/add', {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-Token': CSRF_TOKEN
+                    },
                     body: JSON.stringify({region: region, tokens: text})
                 });
                 const json = await response.json();
@@ -835,7 +901,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             resBox.innerText = 'جاري التوليد... قد يستغرق بضع ثوانٍ...';
 
             try {
-                const response = await fetch(`/generate?region=${encodeURIComponent(region)}&count=${encodeURIComponent(count)}`);
+                const response = await fetch(`/generate?region=${encodeURIComponent(region)}&count=${encodeURIComponent(count)}`, {
+                    headers: {
+                        'X-CSRF-Token': CSRF_TOKEN
+                    }
+                });
                 const json = await response.json();
                 resBox.innerText = JSON.stringify(json, null, 2);
                 loadStats();
@@ -856,9 +926,20 @@ def login():
     if request.method == 'GET':
         if session.get("authenticated") is True:
             return redirect('/')
-        return render_template_string(LOGIN_GATE_HTML, error=None), 200
+        csrf = get_or_create_csrf_token()
+        return render_template_string(LOGIN_GATE_HTML, error=None, csrf_token=csrf), 200
 
-    # POST: receive API key in body, NEVER in query params or URLs
+    # POST: enforce CSRF protection
+    csrf_provided = request.form.get("csrf_token") or (request.get_json(silent=True) or {}).get("csrf_token")
+    csrf_expected = session.get("csrf_token")
+    if not csrf_provided or not csrf_expected or not hmac.compare_digest(str(csrf_provided), str(csrf_expected)):
+        return render_template_string(
+            LOGIN_GATE_HTML,
+            error="رمز CSRF غير صالح أو منتهي الصلاحية. يرجى إعادة تحميل الصفحة والمحاولة مجدداً.",
+            csrf_token=get_or_create_csrf_token()
+        ), 403
+
+    # receive API key in body, NEVER in query params or URLs
     provided_key = request.form.get("key")
     if not provided_key and request.is_json:
         provided_key = (request.get_json(silent=True) or {}).get("key")
@@ -866,16 +947,25 @@ def login():
     expected = os.getenv("API_KEY")
     if expected and provided_key and hmac.compare_digest(str(provided_key).strip(), str(expected).strip()):
         session["authenticated"] = True
+        get_or_create_csrf_token()
         return redirect('/')
 
     return render_template_string(
         LOGIN_GATE_HTML,
-        error="مفتاح API غير صحيح أو غير مصرح به. يرجى التأكد من المفتاح والمحاولة مرة أخرى."
+        error="مفتاح API غير صحيح أو غير مصرح به. يرجى التأكد من المفتاح والمحاولة مرة أخرى.",
+        csrf_token=get_or_create_csrf_token()
     ), 401
 
 
 @app.route('/logout', methods=['GET', 'POST'])
 def logout():
+    # Enforce CSRF protection on logout if user was authenticated
+    if session.get("authenticated") is True:
+        csrf_provided = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
+        csrf_expected = session.get("csrf_token")
+        if not csrf_provided or not csrf_expected or not hmac.compare_digest(str(csrf_provided), str(csrf_expected)):
+            return {"error": "Invalid or missing CSRF token"}, 403
+
     session.clear()
     return redirect('/login')
 
@@ -885,7 +975,8 @@ def logout():
 def home_dashboard():
     if not session.get("authenticated"):
         return redirect('/login')
-    return render_template_string(DASHBOARD_HTML), 200
+    csrf = get_or_create_csrf_token()
+    return render_template_string(DASHBOARD_HTML, csrf_token=csrf), 200
 
 
 @app.route('/like', methods=['GET'])
@@ -985,6 +1076,9 @@ def add_tokens_endpoint():
     if not key_ok():
         return {"error": "Invalid or missing API key"}, 401
 
+    if not validate_csrf_token():
+        return {"error": "Invalid or missing CSRF token"}, 403
+
     data = request.get_json(silent=True) or {}
     region = (data.get("region") or request.args.get("region") or "BD").upper().strip()
 
@@ -1048,6 +1142,9 @@ def add_tokens_endpoint():
 def generate_endpoint():
     if not key_ok():
         return {"error": "Invalid or missing API key"}, 401
+
+    if request.method == 'POST' and not validate_csrf_token():
+        return {"error": "Invalid or missing CSRF token"}, 403
 
     data = request.get_json(silent=True) or {}
     region = (request.args.get("region") or data.get("region") or "BD").upper().strip()
