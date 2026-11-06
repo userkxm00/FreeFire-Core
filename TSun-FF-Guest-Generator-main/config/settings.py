@@ -28,6 +28,11 @@ LOCK = threading.Lock()
 # ── Network & SSL Verification ────────────────────────────────────────────────
 VERIFY_SSL: bool = os.getenv("VERIFY_SSL", "true").lower() in ("1", "true", "yes")
 
+# ── Version & Release Header ──────────────────────────────────────────────────
+# NOTE: TSun's internal binary protobuf payload was built for OB53 (1.114.13).
+# Modifying this header alone does NOT guarantee protocol compatibility with OB55+.
+RELEASE_VERSION: str = os.getenv("RELEASE_VERSION", "OB53")
+
 # ── Credentials / Keys ────────────────────────────────────────────────────────
 
 _HEX_KEY = "32656534343831396539623435393838343531343130363762323831363231383734643064356437616639643866376530306331653534373135623764316533"

@@ -56,9 +56,11 @@ if __name__ == "__main__":
     if not install_requirements():
         sys.exit(1)
 
-    import urllib3
-    from urllib3.exceptions import InsecureRequestWarning
-    urllib3.disable_warnings(InsecureRequestWarning)
+    import config.settings as settings
+    if not settings.VERIFY_SSL:
+        import urllib3
+        from urllib3.exceptions import InsecureRequestWarning
+        urllib3.disable_warnings(InsecureRequestWarning)
 
     from ui.display import safe_exit
     from ui.menus import main_menu

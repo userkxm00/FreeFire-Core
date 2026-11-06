@@ -1,6 +1,6 @@
 #CREDIT :- XHAMSTER.COM, @ARAFAT_FLEX, JONY SING
 #ANY PROBLEM TG :- @ARAFAT_AHMED
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, session, redirect
 import asyncio
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
@@ -10,15 +10,16 @@ import requests
 import json
 import base64
 import time
+import hashlib
+import hmac
+import os
+import threading
+from datetime import datetime, date
 import like_pb2
 import uid_generator_pb2
 import visit_count_pb2
 from google.protobuf.message import DecodeError
 from collections import OrderedDict
-import hmac
-import os
-import threading
-from datetime import datetime, date
 
 # 📄 Load local .env file if present (safe fallback without third-party dependencies)
 _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -40,10 +41,12 @@ import generator_bridge
 app = Flask(__name__)
 
 # 🔐 Security: Require explicit API_KEY configuration. No default hardcoded key.
-API_KEY = os.getenv("API_KEY")
-
 def require_api_key_configured():
-    """Ensure API_KEY is set in environment. Raise RuntimeError if missing."""
+    """
+    Ensure API_KEY is set in environment.
+    Executed at application startup across all environments (Vercel, WSGI, local).
+    Raises RuntimeError if missing or empty.
+    """
     key = os.getenv("API_KEY")
     if not key or not str(key).strip():
         raise RuntimeError(
@@ -52,6 +55,19 @@ def require_api_key_configured():
             "Please configure API_KEY in your environment or .env file before running."
         )
     return str(key).strip()
+
+# Enforce immediately upon module import/initialization (covers direct run, WSGI, and Vercel)
+API_KEY = require_api_key_configured()
+
+# 🔐 Session Configuration for Secure Dashboard Authentication (HttpOnly, SameSite)
+SESSION_SECRET = os.getenv("SESSION_SECRET")
+if not SESSION_SECRET:
+    SESSION_SECRET = hashlib.sha256(f"ff-core-session::{API_KEY}".encode()).hexdigest()
+app.secret_key = SESSION_SECRET
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+if os.getenv("COOKIE_SECURE", "false").lower() in ("1", "true", "yes"):
+    app.config["SESSION_COOKIE_SECURE"] = True
 
 # 🌐 Configurable SSL verification (enabled by default for security)
 VERIFY_SSL = os.getenv("VERIFY_SSL", "true").lower() in {"1", "true", "yes"}
@@ -122,16 +138,22 @@ class UsageTracker:
             return count
 
 
-def key_ok(provided_key=None):
+def is_request_authenticated(provided_key=None):
     """
-    Validate API key from multiple sources:
-    1. Direct argument
-    2. Header 'X-API-Key'
-    3. Header 'Authorization: Bearer <key>'
-    4. Query parameter 'key'
-    5. JSON body 'key'
-    Fails closed if API_KEY is not configured in the environment.
+    Multi-channel secure authentication:
+    1. Active Flask session cookie (session['authenticated'] == True) - used by Web UI
+    2. Header 'X-API-Key' - used by REST clients / bots
+    3. Header 'Authorization: Bearer <key>' - standard REST Bearer auth
+    4. JSON body 'key' (POST requests only)
+
+    SECURITY ENFORCEMENT:
+    Query parameters (?key=...) are EXPLICITLY REJECTED to prevent API keys
+    from leaking into browser history, server logs, reverse proxies, and referrer headers.
     """
+    # 1. Session authentication (Web Dashboard)
+    if session.get("authenticated") is True:
+        return True
+
     expected = os.getenv("API_KEY")
     if not expected or not str(expected).strip():
         app.logger.warning("Rejecting request: API_KEY is not configured in environment.")
@@ -144,12 +166,13 @@ def key_ok(provided_key=None):
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Bearer "):
             key = auth[7:].strip()
-    if not key:
-        key = request.args.get("key")
-    if not key and request.is_json:
+    if not key and request.is_json and request.method == "POST":
         key = (request.get_json(silent=True) or {}).get("key")
 
     return key is not None and hmac.compare_digest(str(key).strip(), str(expected).strip())
+
+# Backward-compatible alias
+key_ok = is_request_authenticated
 
 
 def validate_uid(uid_str):
@@ -164,6 +187,9 @@ def check_jwt_structure(token_str):
     """
     Syntax check: Verify that token consists of 3 dot-separated segments,
     starts with base64url 'ey' (JSON '{'), and contains valid length.
+
+    NOTE: This does NOT cryptographically verify Garena's signature
+    as Garena's private/public keys are proprietary.
     """
     if not token_str or not isinstance(token_str, str):
         return False
@@ -173,9 +199,14 @@ def check_jwt_structure(token_str):
 
 def inspect_jwt_payload(token_str):
     """
-    Offline Claims & Expiration Inspection.
-    Decodes the JWT payload segment (without signature verification, which requires
-    Garena's private/public key) and checks expiration timestamp ('exp') if present.
+    Offline Unverified Claims & Expiration Inspection.
+    Decodes the JWT payload segment WITHOUT cryptographic signature verification.
+    Checks the expiration timestamp ('exp') if present in claims.
+
+    IMPORTANT DISTINCTION:
+    A return of (True, ...) indicates structural validity and non-expired status ONLY.
+    It does NOT prove that Garena issued or still recognizes the token. Cryptographic
+    signature validation is impossible without Garena's signing keys.
     Returns (is_valid, claims, message).
     """
     if not check_jwt_structure(token_str):
@@ -196,7 +227,7 @@ def inspect_jwt_payload(token_str):
             if exp < now_ts:
                 return False, claims, f"Token expired at timestamp {exp} (now: {now_ts})"
 
-        return True, claims, "Valid structure and non-expired"
+        return True, claims, "Valid structure and non-expired (signature unverified)"
     except Exception as exc:
         return False, {}, f"Failed to decode JWT payload: {exc}"
 
@@ -382,13 +413,13 @@ def make_request(encrypt, region, token):
         return None
 
 
-# 🔒 HTML Login Gate (Returned with 401 when unauthenticated)
+# 🔒 HTML Login Gate (Returned with 401 or 200 on /login)
 LOGIN_GATE_HTML = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Authentication Required - FreeFire Core</title>
+    <title>تسجيل الدخول - FreeFire Core</title>
     <style>
         body {
             background-color: #0d1117;
@@ -446,14 +477,27 @@ LOGIN_GATE_HTML = """<!DOCTYPE html>
             font-size: 0.85rem;
             margin-bottom: 15px;
         }
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 20px;
+            background: #21262d;
+            color: #58a6ff;
+            font-size: 0.8rem;
+            margin-bottom: 15px;
+        }
     </style>
 </head>
 <body>
     <div class="login-box">
-        <h2>🔒 تسجيل الدخول المطلوب</h2>
-        <div class="alert">لوحة التحكم محمية. يرجى إدخال مفتاح API Key المصرح به للوصول.</div>
-        <p>يتم التحقق من المفتاح مباشرة على الخادم (Server-side Auth).</p>
-        <form method="GET" action="/">
+        <h2>🔒 تسجيل الدخول للوحة التحكم</h2>
+        <span class="badge">جلسة مشفرة آمنة (POST Auth)</span>
+        {% if error %}
+        <div class="alert">{{ error }}</div>
+        {% else %}
+        <p>أدخل مفتاح الـ API للوصول. يتم الإرسال عبر طلب POST مشفر دون تسريب المفتاح في الروابط.</p>
+        {% endif %}
+        <form method="POST" action="/login">
             <input type="password" name="key" placeholder="أدخل مفتاح الـ API هنا..." required autofocus>
             <button type="submit">فتح لوحة التحكم</button>
         </form>
@@ -600,8 +644,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <body>
     <div class="container">
         <header>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; flex-wrap:wrap; gap:10px;">
+                <span class="badge badge-green">🔒 جلسة ويب مشفرة وآمنة (HttpOnly Cookie)</span>
+                <form method="POST" action="/logout" style="margin:0;">
+                    <button type="submit" style="background:#21262d; border:1px solid #30363d; color:#c9d1d9; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:0.85rem; width:auto; margin:0;">تسجيل الخروج 🚪</button>
+                </form>
+            </div>
             <h1>🔥 ARAFAT FLEX - FREE FIRE LIKE BOT</h1>
-            <p>نظام زيادة لايكات فري فاير وإدارة التوكنات المتكامل (OB55)</p>
+            <p>نظام زيادة لايكات فري فاير وإدارة التوكنات المتكامل</p>
         </header>
 
         <div class="grid">
@@ -699,13 +749,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
 
     <script>
-        const CURRENT_KEY = "{{ current_key }}";
-
+        // Secure Session Auth: Browser transmits HttpOnly session cookies automatically.
+        // No API keys are embedded or accessible in JavaScript or HTML.
         async function loadStats() {
             try {
-                const res = await fetch('/tokens/status', {
-                    headers: {'X-API-Key': CURRENT_KEY}
-                });
+                const res = await fetch('/tokens/status');
                 const data = await res.json();
                 const tbody = document.getElementById('tokens_tbody');
                 tbody.innerHTML = '';
@@ -718,9 +766,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                     }
                 }
 
-                const remainRes = await fetch('/remain', {
-                    headers: {'X-API-Key': CURRENT_KEY}
-                });
+                const remainRes = await fetch('/remain');
                 if (remainRes.ok) {
                     const remainData = await remainRes.json();
                     document.getElementById('remain_stat').innerText = `${remainData.remaining} / ${remainData.daily_limit} (مستخدم: ${remainData.used})`;
@@ -744,9 +790,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             resBox.innerText = 'جاري الاتصال بسيرفر فري فاير...';
 
             try {
-                const response = await fetch(`/like?uid=${uid}&region=${region}`, {
-                    headers: {'X-API-Key': CURRENT_KEY}
-                });
+                const response = await fetch(`/like?uid=${encodeURIComponent(uid)}&region=${encodeURIComponent(region)}`);
                 const json = await response.json();
                 resBox.innerText = JSON.stringify(json, null, 2);
                 loadStats();
@@ -770,10 +814,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             try {
                 const response = await fetch('/tokens/add', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'X-API-Key': CURRENT_KEY
-                    },
+                    headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({region: region, tokens: text})
                 });
                 const json = await response.json();
@@ -794,9 +835,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             resBox.innerText = 'جاري التوليد... قد يستغرق بضع ثوانٍ...';
 
             try {
-                const response = await fetch(`/generate?region=${region}&count=${count}`, {
-                    headers: {'X-API-Key': CURRENT_KEY}
-                });
+                const response = await fetch(`/generate?region=${encodeURIComponent(region)}&count=${encodeURIComponent(count)}`);
                 const json = await response.json();
                 resBox.innerText = JSON.stringify(json, null, 2);
                 loadStats();
@@ -811,15 +850,42 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </html>"""
 
 
-# 🏠 Web UI Dashboard Route (Server-Side Authentication Gate)
+# 🔐 Authentication & Session Routes
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'GET':
+        if session.get("authenticated") is True:
+            return redirect('/')
+        return render_template_string(LOGIN_GATE_HTML, error=None), 200
+
+    # POST: receive API key in body, NEVER in query params or URLs
+    provided_key = request.form.get("key")
+    if not provided_key and request.is_json:
+        provided_key = (request.get_json(silent=True) or {}).get("key")
+
+    expected = os.getenv("API_KEY")
+    if expected and provided_key and hmac.compare_digest(str(provided_key).strip(), str(expected).strip()):
+        session["authenticated"] = True
+        return redirect('/')
+
+    return render_template_string(
+        LOGIN_GATE_HTML,
+        error="مفتاح API غير صحيح أو غير مصرح به. يرجى التأكد من المفتاح والمحاولة مرة أخرى."
+    ), 401
+
+
+@app.route('/logout', methods=['GET', 'POST'])
+def logout():
+    session.clear()
+    return redirect('/login')
+
+
+# 🏠 Web UI Dashboard Route (Server-Side Session Check)
 @app.route('/', methods=['GET'])
 def home_dashboard():
-    # Enforce server-side authentication: unauthenticated clients receive 401 Login Gate
-    if not key_ok():
-        return render_template_string(LOGIN_GATE_HTML), 401
-
-    key = request.args.get("key") or request.headers.get("X-API-Key") or ""
-    return render_template_string(DASHBOARD_HTML, current_key=key), 200
+    if not session.get("authenticated"):
+        return redirect('/login')
+    return render_template_string(DASHBOARD_HTML), 200
 
 
 @app.route('/like', methods=['GET'])
