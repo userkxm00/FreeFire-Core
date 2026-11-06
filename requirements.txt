@@ -1,0 +1,9 @@
+Flask[async]
+requests
+aiohttp
+pycryptodome
+protobuf
+Werkzeug
+colorama
+urllib3
+psutil
