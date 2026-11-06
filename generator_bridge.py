@@ -12,12 +12,15 @@ Provides:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import threading
 import time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+logger = logging.getLogger("generator_bridge")
 
 # Add TSun generator directory to sys.path
 _CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -49,6 +52,11 @@ _BRIDGE_LOCK = threading.Lock()
 _REGION_GENERATING_LOCKS: Dict[str, threading.Lock] = {}
 _ACTIVE_JOBS: Dict[str, Dict[str, Any]] = {}
 
+# Set of all valid regions supported across Garena / Free Fire
+SUPPORTED_REGIONS = {
+    "BD", "IND", "BR", "US", "SAC", "NA", "ME", "ID", "VN", "TH", "PK", "CIS", "SG", "TW"
+}
+
 
 def _get_region_lock(region: str) -> threading.Lock:
     with _BRIDGE_LOCK:
@@ -56,6 +64,20 @@ def _get_region_lock(region: str) -> threading.Lock:
         if reg not in _REGION_GENERATING_LOCKS:
             _REGION_GENERATING_LOCKS[reg] = threading.Lock()
         return _REGION_GENERATING_LOCKS[reg]
+
+
+def _cleanup_old_jobs(max_age_seconds: int = 3600) -> None:
+    """Remove completed or errored jobs older than max_age_seconds to prevent memory leaks."""
+    now = time.time()
+    with _BRIDGE_LOCK:
+        to_delete = []
+        for j_id, j_data in _ACTIVE_JOBS.items():
+            if j_data.get("status") in {"finished", "error"}:
+                created_ts = j_data.get("created_ts", now)
+                if now - created_ts > max_age_seconds:
+                    to_delete.append(j_id)
+        for j_id in to_delete:
+            _ACTIVE_JOBS.pop(j_id, None)
 
 
 # ── File and Region Mapping Helpers ───────────────────────────────────────────
@@ -75,13 +97,23 @@ def get_token_filepath(region: str) -> str:
 
 
 def map_to_tsun_region(region: str) -> str:
-    """Map API region code to TSun supported region code."""
-    reg = (region or "BD").upper()
+    """
+    Map API region code to TSun supported region code.
+    Raises ValueError if region is completely unknown/unsupported.
+    """
+    if not region:
+        raise ValueError("Region parameter cannot be empty.")
+    reg = region.upper().strip()
     if reg in {"US", "NA"}:
         return "SAC"
-    if reg not in tsun_settings.REGION_LANG and reg != "BR":
-        return "BD"
-    return reg
+    if reg == "BR":
+        return "BR"
+    if reg in tsun_settings.REGION_LANG:
+        return reg
+
+    raise ValueError(
+        f"Region '{region}' is not supported. Supported regions: {sorted(list(SUPPORTED_REGIONS))}"
+    )
 
 
 # ── Token I/O Helpers ─────────────────────────────────────────────────────────
@@ -90,6 +122,7 @@ def read_tokens(region: str) -> List[Dict[str, Any]]:
     """
     Read tokens from the region's JSON file.
     Always returns a list of dictionaries. Creates file if missing.
+    Backs up corrupted file if invalid JSON is detected.
     """
     filepath = get_token_filepath(region)
     if not os.path.exists(filepath):
@@ -102,8 +135,18 @@ def read_tokens(region: str) -> List[Dict[str, Any]]:
             data = json.load(f)
             if isinstance(data, list):
                 return data
+            logger.warning(f"Token file {filepath} was not a list, resetting.")
             return []
-    except (json.JSONDecodeError, IOError):
+    except (json.JSONDecodeError, IOError) as exc:
+        logger.error(f"Error reading JSON from {filepath}: {exc}")
+        # Back up corrupted file
+        try:
+            corrupt_backup = filepath + f".corrupt_{int(time.time())}"
+            os.replace(filepath, corrupt_backup)
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump([], f)
+        except Exception:
+            pass
         return []
 
 
@@ -140,19 +183,19 @@ def append_tokens(region: str, new_entries: List[Dict[str, Any]]) -> int:
                 tk = e.get("token") or e.get("jwt_token") or ""
                 aid = e.get("account_id") or ""
                 if tk:
-                    existing_tokens.add(tk)
+                    existing_tokens.add(tk.strip())
                 if aid:
-                    existing_tokens.add(str(aid))
+                    existing_tokens.add(str(aid).strip())
 
         added = 0
         for item in new_entries:
-            tk = item.get("token") or item.get("jwt_token") or ""
-            aid = item.get("account_id") or ""
-            if tk and tk not in existing_tokens:
+            tk = (item.get("token") or item.get("jwt_token") or "").strip()
+            aid = str(item.get("account_id") or "").strip()
+            if tk and tk not in existing_tokens and (not aid or aid not in existing_tokens):
                 existing.append(item)
                 existing_tokens.add(tk)
                 if aid:
-                    existing_tokens.add(str(aid))
+                    existing_tokens.add(aid)
                 added += 1
 
         tmp_file = filepath + ".tmp"
@@ -191,7 +234,7 @@ def generate_tokens(
             nonlocal success_count
             attempts = 0
             max_thread_attempts = max(3, total_target * 2)
-            while attempts < max_thread_attempts:
+            while attempts < max_thread_attempts and not tsun_settings.EXIT_FLAG:
                 attempts += 1
                 with counter_lock:
                     if success_count >= total_target:
@@ -274,7 +317,7 @@ def generate_tokens(
             workers.append(t)
 
         for t in workers:
-            t.join(timeout=180)
+            t.join(timeout=60)
 
         # Append collected tokens to root token file
         saved_count = append_tokens(reg_upper, collected_tokens)
@@ -306,14 +349,17 @@ def ensure_tokens_available(
     if current_count >= min_tokens:
         return current_count, False
 
-    # Auto-refill needed
-    gen_result = generate_tokens(
-        region=region,
-        count=refill_amount,
-        threads=threads,
-        name_prefix="Arafat",
-        pass_prefix="Flex",
-    )
+    try:
+        generate_tokens(
+            region=region,
+            count=refill_amount,
+            threads=threads,
+            name_prefix="Arafat",
+            pass_prefix="Flex",
+        )
+    except Exception as e:
+        logger.warning(f"ensure_tokens_available failed for {region}: {e}")
+
     new_count = count_valid_tokens(region)
     return new_count, True
 
@@ -322,7 +368,7 @@ def ensure_tokens_available(
 
 def get_tokens_status() -> Dict[str, Any]:
     """Return token count and files overview for all known regions."""
-    regions = ["BD", "IND", "BR", "ME", "ID", "VN", "TH", "PK", "TW", "CIS", "SG", "SAC"]
+    regions = sorted(list(SUPPORTED_REGIONS))
     summary: Dict[str, Any] = {}
     total_all = 0
 
@@ -350,19 +396,23 @@ def start_background_generation(
     pass_prefix: str = "Flex",
 ) -> str:
     """Start token generation in a background thread and return job ID."""
+    _cleanup_old_jobs()
     job_id = f"job_{region.upper()}_{int(time.time())}"
-    _ACTIVE_JOBS[job_id] = {
-        "job_id": job_id,
-        "region": region.upper(),
-        "target": count,
-        "completed": 0,
-        "status": "running",
-        "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
+    with _BRIDGE_LOCK:
+        _ACTIVE_JOBS[job_id] = {
+            "job_id": job_id,
+            "region": region.upper(),
+            "target": count,
+            "completed": 0,
+            "status": "running",
+            "created_ts": time.time(),
+            "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
     def _progress(current: int, total: int, _entry: dict):
-        if job_id in _ACTIVE_JOBS:
-            _ACTIVE_JOBS[job_id]["completed"] = current
+        with _BRIDGE_LOCK:
+            if job_id in _ACTIVE_JOBS:
+                _ACTIVE_JOBS[job_id]["completed"] = current
 
     def _run():
         try:
@@ -374,11 +424,15 @@ def start_background_generation(
                 pass_prefix=pass_prefix,
                 progress_callback=_progress,
             )
-            _ACTIVE_JOBS[job_id]["status"] = "finished"
-            _ACTIVE_JOBS[job_id]["result"] = result
+            with _BRIDGE_LOCK:
+                if job_id in _ACTIVE_JOBS:
+                    _ACTIVE_JOBS[job_id]["status"] = "finished"
+                    _ACTIVE_JOBS[job_id]["result"] = result
         except Exception as exc:
-            _ACTIVE_JOBS[job_id]["status"] = "error"
-            _ACTIVE_JOBS[job_id]["error"] = str(exc)
+            with _BRIDGE_LOCK:
+                if job_id in _ACTIVE_JOBS:
+                    _ACTIVE_JOBS[job_id]["status"] = "error"
+                    _ACTIVE_JOBS[job_id]["error"] = str(exc)
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -386,5 +440,8 @@ def start_background_generation(
 
 
 def get_job_status(job_id: str) -> Optional[Dict[str, Any]]:
-    return _ACTIVE_JOBS.get(job_id)
-
+    with _BRIDGE_LOCK:
+        job = _ACTIVE_JOBS.get(job_id)
+        if job:
+            return dict(job)
+        return None

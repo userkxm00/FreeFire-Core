@@ -15,25 +15,109 @@ from google.protobuf.message import DecodeError
 from collections import OrderedDict
 import hmac
 import os
+import threading
+from datetime import datetime, date
 import generator_bridge
 
 app = Flask(__name__)
 
-# 🔢 Like limit tracking
-daily_limit = 30
-used_count = 0
+# 🔐 Security: Configurable API Key
+DEFAULT_KEY = "@ARAFAT_FLEX"
+API_KEY = os.getenv("API_KEY", DEFAULT_KEY)
 
-# 🔑 API key (use ?key=@ARAFAT_FLEX)
-API_KEY = os.getenv("API_KEY", "@ARAFAT_FLEX")
+# 🌐 Configurable SSL verification (enabled by default for security)
+VERIFY_SSL = os.getenv("VERIFY_SSL", "true").lower() in {"1", "true", "yes"}
 
 # ⚙️ Auto-refill configuration
 AUTO_REFILL_ENABLED = os.getenv("AUTO_REFILL", "true").lower() in {"1", "true", "yes"}
 MIN_TOKEN_THRESHOLD = int(os.getenv("MIN_TOKEN_THRESHOLD", "5"))
 DEFAULT_REFILL_AMOUNT = int(os.getenv("DEFAULT_REFILL_AMOUNT", "10"))
 
+# Allowed regions list
+ALLOWED_REGIONS = {
+    "BD", "IND", "BR", "US", "SAC", "NA", "ME", "ID", "VN", "TH", "PK", "CIS", "SG", "TW"
+}
 
-def key_ok(provided):
-    return provided is not None and hmac.compare_digest(str(provided), API_KEY)
+# 🔢 Persistent Thread-Safe Usage Tracker
+STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "usage_state.json")
+_STATE_LOCK = threading.Lock()
+daily_limit = 30
+
+
+class UsageTracker:
+    @staticmethod
+    def _load_state():
+        today_str = str(date.today())
+        if os.path.exists(STATE_FILE):
+            try:
+                with open(STATE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if data.get("date") == today_str:
+                        return data.get("used_count", 0)
+            except Exception:
+                pass
+        return 0
+
+    @staticmethod
+    def _save_state(count):
+        today_str = str(date.today())
+        try:
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump({"date": today_str, "used_count": count}, f)
+        except Exception:
+            pass
+
+    @classmethod
+    def get_used_count(cls):
+        with _STATE_LOCK:
+            return cls._load_state()
+
+    @classmethod
+    def increment(cls):
+        with _STATE_LOCK:
+            count = cls._load_state() + 1
+            cls._save_state(count)
+            return count
+
+
+def key_ok(provided_key=None):
+    """
+    Validate API key from multiple sources:
+    1. Header 'X-API-Key'
+    2. Header 'Authorization: Bearer <key>'
+    3. Query parameter 'key'
+    4. JSON body 'key'
+    """
+    key = provided_key
+    if not key:
+        key = request.headers.get("X-API-Key")
+    if not key and request.headers.get("Authorization"):
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            key = auth[7:].strip()
+    if not key:
+        key = request.args.get("key")
+    if not key and request.is_json:
+        key = (request.get_json(silent=True) or {}).get("key")
+
+    return key is not None and hmac.compare_digest(str(key).strip(), API_KEY)
+
+
+def validate_uid(uid_str):
+    """Ensure UID is a positive integer between 7 and 15 digits."""
+    if not uid_str or not str(uid_str).strip().isdigit():
+        return False
+    val = int(uid_str)
+    return 100_000 <= val <= 999_999_999_999_999
+
+
+def validate_jwt_format(token_str):
+    """Validate standard 3-part base64url JWT structure."""
+    if not token_str or not isinstance(token_str, str):
+        return False
+    token_str = token_str.strip()
+    parts = token_str.split(".")
+    return len(parts) == 3 and parts[0].startswith("ey") and len(token_str) > 20
 
 
 def get_token_str(t):
@@ -55,26 +139,22 @@ def load_tokens(region, auto_refill=True):
 
         if auto_refill and AUTO_REFILL_ENABLED and current_count < MIN_TOKEN_THRESHOLD:
             # Trigger background generation non-blockingly so the request doesn't hang
-            try:
-                import threading
-                def _bg_refill():
-                    try:
-                        generator_bridge.ensure_tokens_available(
-                            region=region,
-                            min_tokens=MIN_TOKEN_THRESHOLD,
-                            refill_amount=DEFAULT_REFILL_AMOUNT,
-                        )
-                    except Exception:
-                        pass
-                threading.Thread(target=_bg_refill, daemon=True).start()
-            except Exception:
-                pass
+            def _bg_refill():
+                try:
+                    generator_bridge.ensure_tokens_available(
+                        region=region,
+                        min_tokens=MIN_TOKEN_THRESHOLD,
+                        refill_amount=DEFAULT_REFILL_AMOUNT,
+                    )
+                except Exception:
+                    pass
+            threading.Thread(target=_bg_refill, daemon=True).start()
 
         raw_tokens = generator_bridge.read_tokens(region)
         valid_tokens = []
         for t in raw_tokens:
             token_str = get_token_str(t)
-            if token_str and len(token_str) > 10:
+            if token_str and validate_jwt_format(token_str):
                 if isinstance(t, dict):
                     t["token"] = token_str
                     t["jwt_token"] = token_str
@@ -181,7 +261,6 @@ def get_profile_url(region):
     elif region in {"BR", "US", "SAC", "NA"}:
         return "https://client.us.freefiremobile.com/GetPlayerPersonalShow"
     else:
-        # All other regions (ME, BD, ID, VN, TH, PK, CIS, SG) use ppmainecoonghj
         return "https://clientbp.ppmainecoonghj.com/GetPlayerPersonalShow"
 
 
@@ -209,7 +288,7 @@ def make_request(encrypt, region, token):
             "X-GA": "v1 1",
             "ReleaseVersion": "OB55"
         }
-        response = requests.post(url, data=edata, headers=headers, verify=False, timeout=10)
+        response = requests.post(url, data=edata, headers=headers, verify=VERIFY_SSL, timeout=10)
         binary = response.content
         decoded = visit_count_pb2.Info()
         decoded.ParseFromString(binary)
@@ -226,7 +305,8 @@ def make_request(encrypt, region, token):
 @app.route('/')
 def home_dashboard():
     tokens_info = generator_bridge.get_tokens_status()
-    remaining = max(daily_limit - used_count, 0)
+    used = UsageTracker.get_used_count()
+    remaining = max(daily_limit - used, 0)
     html = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
@@ -369,6 +449,13 @@ def home_dashboard():
             <p>نظام زيادة لايكات فري فاير وإدارة التوكنات المتكامل (OB55)</p>
         </header>
 
+        <div class="card" style="margin-bottom:20px;">
+            <h2>🔑 تسجيل الدخول بالـ API Key</h2>
+            <label>أدخل مفتاحك للتحكم (API Key):</label>
+            <input type="password" id="global_api_key" placeholder="أدخل مفتاح الـ API هنا..." value="">
+            <small style="color:#8b949e;">المفتاح مطلوب لجميع العمليات ولا يتم حفظه في السجلات.</small>
+        </div>
+
         <div class="grid">
             <!-- Card 1: إرسال لايكات -->
             <div class="card">
@@ -389,9 +476,6 @@ def home_dashboard():
                     <option value="PK">باكستان (PK)</option>
                     <option value="CIS">روسيا / CIS</option>
                 </select>
-
-                <label>مفتاح API Key:</label>
-                <input type="text" id="like_key" value="@ARAFAT_FLEX">
 
                 <button id="like_btn" onclick="sendLikes()">إرسال اللايكات الآن</button>
                 <div id="like_result" class="result-box"></div>
@@ -467,9 +551,26 @@ def home_dashboard():
     </div>
 
     <script>
+        function getKey() {
+            let key = document.getElementById('global_api_key').value.trim();
+            if (!key) {
+                key = localStorage.getItem('api_key') || '';
+                if (key) document.getElementById('global_api_key').value = key;
+            }
+            if (key) localStorage.setItem('api_key', key);
+            return key;
+        }
+
         async function loadStats() {
+            const key = getKey();
             try {
-                const res = await fetch('/tokens/status?key=@ARAFAT_FLEX');
+                const res = await fetch('/tokens/status', {
+                    headers: key ? {'X-API-Key': key} : {}
+                });
+                if (res.status === 401) {
+                    document.getElementById('tokens_tbody').innerHTML = '<tr><td colspan="3" style="color:#f85149;">يرجى إدخال مفتاح API Key بالأعلى أولاً!</td></tr>';
+                    return;
+                }
                 const data = await res.json();
                 const tbody = document.getElementById('tokens_tbody');
                 tbody.innerHTML = '';
@@ -482,9 +583,13 @@ def home_dashboard():
                     }
                 }
 
-                const remainRes = await fetch('/remain');
-                const remainData = await remainRes.json();
-                document.getElementById('remain_stat').innerText = `${remainData.remaining} / ${remainData.daily_limit} (مستخدم: ${remainData.used})`;
+                const remainRes = await fetch('/remain', {
+                    headers: key ? {'X-API-Key': key} : {}
+                });
+                if (remainRes.ok) {
+                    const remainData = await remainRes.json();
+                    document.getElementById('remain_stat').innerText = `${remainData.remaining} / ${remainData.daily_limit} (مستخدم: ${remainData.used})`;
+                }
             } catch (e) {
                 console.error(e);
             }
@@ -493,18 +598,22 @@ def home_dashboard():
         async function sendLikes() {
             const uid = document.getElementById('like_uid').value.trim();
             const region = document.getElementById('like_region').value;
-            const key = document.getElementById('like_key').value.trim();
+            const key = getKey();
             const btn = document.getElementById('like_btn');
             const resBox = document.getElementById('like_result');
 
+            if (!key) { alert('يرجى إدخال مفتاح API Key في الأعلى أولاً!'); return; }
             if (!uid) { alert('يرجى إدخال UID اللاعب!'); return; }
+
             btn.disabled = true;
             btn.innerText = 'جاري إرسال الطلب... ⏳';
             resBox.style.display = 'block';
             resBox.innerText = 'جاري الاتصال بسيرفر فري فاير...';
 
             try {
-                const response = await fetch(`/like?uid=${uid}&region=${region}&key=${encodeURIComponent(key)}`);
+                const response = await fetch(`/like?uid=${uid}&region=${region}`, {
+                    headers: {'X-API-Key': key}
+                });
                 const json = await response.json();
                 resBox.innerText = JSON.stringify(json, null, 2);
                 loadStats();
@@ -519,8 +628,10 @@ def home_dashboard():
         async function addTokens() {
             const region = document.getElementById('token_region').value;
             const text = document.getElementById('tokens_text').value.trim();
+            const key = getKey();
             const resBox = document.getElementById('token_add_result');
 
+            if (!key) { alert('يرجى إدخال مفتاح API Key في الأعلى أولاً!'); return; }
             if (!text) { alert('يرجى لصق التوكنات أولاً!'); return; }
             resBox.style.display = 'block';
             resBox.innerText = 'جاري حفظ التوكنات...';
@@ -528,8 +639,11 @@ def home_dashboard():
             try {
                 const response = await fetch('/tokens/add', {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({region: region, tokens: text, key: '@ARAFAT_FLEX'})
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-API-Key': key
+                    },
+                    body: JSON.stringify({region: region, tokens: text})
                 });
                 const json = await response.json();
                 resBox.innerText = JSON.stringify(json, null, 2);
@@ -543,13 +657,17 @@ def home_dashboard():
         async function generateTokens() {
             const region = document.getElementById('gen_region').value;
             const count = document.getElementById('gen_count').value;
+            const key = getKey();
             const resBox = document.getElementById('gen_result');
 
+            if (!key) { alert('يرجى إدخال مفتاح API Key في الأعلى أولاً!'); return; }
             resBox.style.display = 'block';
             resBox.innerText = 'جاري التوليد... قد يستغرق بضع ثوانٍ...';
 
             try {
-                const response = await fetch(`/generate?region=${region}&count=${count}&key=@ARAFAT_FLEX`);
+                const response = await fetch(`/generate?region=${region}&count=${count}`, {
+                    headers: {'X-API-Key': key}
+                });
                 const json = await response.json();
                 resBox.innerText = JSON.stringify(json, null, 2);
                 loadStats();
@@ -558,7 +676,10 @@ def home_dashboard():
             }
         }
 
-        window.onload = loadStats;
+        window.onload = function() {
+            getKey();
+            loadStats();
+        };
     </script>
 </body>
 </html>"""
@@ -567,20 +688,23 @@ def home_dashboard():
 
 @app.route('/like', methods=['GET'])
 def handle_requests():
-    global used_count
-
-    if not key_ok(request.args.get("key")):
+    if not key_ok():
         return {"error": "Invalid or missing API key"}, 401
 
     uid = request.args.get("uid")
-    region = request.args.get("region", "").upper()
-    if not uid or not region:
-        return {"error": "UID and region are required"}, 400
+    region = request.args.get("region", "").upper().strip()
+
+    # Strict input validation
+    if not validate_uid(uid):
+        return {"error": "UID must be a numeric ID between 7 and 15 digits"}, 400
+
+    if not region or region not in ALLOWED_REGIONS:
+        return {
+            "error": f"Invalid region '{region}'. Allowed regions: {sorted(list(ALLOWED_REGIONS))}"
+        }, 400
 
     try:
         def process_request():
-            global used_count
-
             tokens = load_tokens(region, auto_refill=True)
             if not tokens:
                 return {
@@ -619,8 +743,9 @@ def handle_requests():
             like_given = after_like - before_like
             status = 1 if like_given > 0 else 2
 
+            used_count = UsageTracker.get_used_count()
             if status == 1:
-                used_count += 1
+                used_count = UsageTracker.increment()
 
             remaining = max(daily_limit - used_count, 0)
 
@@ -648,62 +773,56 @@ def handle_requests():
         return process_request()
 
     except Exception as e:
-        app.logger.error(f"Error: {e}")
+        app.logger.error(f"Error in /like: {e}")
         return {"error": str(e)}, 500
 
 
-# 🆕 /tokens/add endpoint (Add raw tokens directly)
+# 🆕 /tokens/add endpoint (Add raw tokens directly with validation)
 @app.route('/tokens/add', methods=['POST'])
 def add_tokens_endpoint():
-    data = request.get_json(silent=True) or {}
-    key = data.get("key") or request.args.get("key")
-    if not key_ok(key):
+    if not key_ok():
         return {"error": "Invalid or missing API key"}, 401
 
-    region = (data.get("region") or request.args.get("region") or "BD").upper()
-    raw_input = data.get("tokens") or ""
+    data = request.get_json(silent=True) or {}
+    region = (data.get("region") or request.args.get("region") or "BD").upper().strip()
 
+    if region not in ALLOWED_REGIONS:
+        return {"error": f"Invalid region '{region}'. Allowed: {sorted(list(ALLOWED_REGIONS))}"}, 400
+
+    raw_input = data.get("tokens") or ""
     entries_to_add = []
+
+    def _process_candidate(candidate_str):
+        candidate_str = candidate_str.strip().strip('"').strip("'").strip(',')
+        if validate_jwt_format(candidate_str):
+            entries_to_add.append({
+                "token": candidate_str,
+                "jwt_token": candidate_str,
+                "region": region,
+                "date_added": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+
     if isinstance(raw_input, str):
-        # Could be newline separated tokens or a JSON array string
         raw_input = raw_input.strip()
         if raw_input.startswith("[") and raw_input.endswith("]"):
             try:
                 parsed = json.loads(raw_input)
                 if isinstance(parsed, list):
                     for item in parsed:
-                        tk = get_token_str(item)
-                        if tk and len(tk) > 10:
-                            entries_to_add.append({
-                                "token": tk,
-                                "jwt_token": tk,
-                                "region": region
-                            })
+                        _process_candidate(get_token_str(item))
             except Exception:
                 pass
         if not entries_to_add:
-            # Parse line by line
-            lines = raw_input.splitlines()
-            for line in lines:
-                tk = line.strip().strip('"').strip(',').strip()
-                if tk and len(tk) > 10:
-                    entries_to_add.append({
-                        "token": tk,
-                        "jwt_token": tk,
-                        "region": region
-                    })
+            for line in raw_input.splitlines():
+                _process_candidate(line)
     elif isinstance(raw_input, list):
         for item in raw_input:
-            tk = get_token_str(item)
-            if tk and len(tk) > 10:
-                entries_to_add.append({
-                    "token": tk,
-                    "jwt_token": tk,
-                    "region": region
-                })
+            _process_candidate(get_token_str(item))
 
     if not entries_to_add:
-        return {"error": "No valid tokens found in input."}, 400
+        return {
+            "error": "No valid JWT tokens found in input. Tokens must follow JWT format (ey... with 3 segments separated by dots)."
+        }, 400
 
     added = generator_bridge.append_tokens(region, entries_to_add)
     total = generator_bridge.count_valid_tokens(region)
@@ -718,15 +837,23 @@ def add_tokens_endpoint():
 # 🆕 /generate endpoint (On-demand token generation via TSun)
 @app.route('/generate', methods=['GET', 'POST'])
 def generate_endpoint():
-    key = request.args.get("key") or (request.json.get("key") if request.is_json else None)
-    if not key_ok(key):
+    if not key_ok():
         return {"error": "Invalid or missing API key"}, 401
 
     data = request.get_json(silent=True) or {}
-    region = (request.args.get("region") or data.get("region") or "BD").upper()
-    count = int(request.args.get("count") or data.get("count") or 10)
+    region = (request.args.get("region") or data.get("region") or "BD").upper().strip()
+
+    if region not in ALLOWED_REGIONS:
+        return {"error": f"Invalid region '{region}'. Allowed: {sorted(list(ALLOWED_REGIONS))}"}, 400
+
+    # Safe numeric validation
+    try:
+        count = int(request.args.get("count") or data.get("count") or 10)
+        threads = int(request.args.get("threads") or data.get("threads") or 3)
+    except (ValueError, TypeError):
+        return {"error": "'count' and 'threads' must be valid integers."}, 400
+
     count = max(1, min(count, 100))
-    threads = int(request.args.get("threads") or data.get("threads") or 3)
     threads = max(1, min(threads, 8))
     is_async = (request.args.get("async") or str(data.get("async", ""))).lower() in {"1", "true", "yes"}
 
@@ -741,12 +868,13 @@ def generate_endpoint():
             name_prefix=name_prefix,
             pass_prefix=pass_prefix,
         )
+        # Note: Do NOT leak API key in check_status_url
         return jsonify({
             "status": "queued",
             "job_id": job_id,
             "region": region,
             "target": count,
-            "check_status_url": f"/generate/status?job_id={job_id}&key={API_KEY}"
+            "check_status_url": f"/generate/status?job_id={job_id}"
         }), 202
 
     result = generator_bridge.generate_tokens(
@@ -762,7 +890,7 @@ def generate_endpoint():
 # 🆕 /generate/status endpoint
 @app.route('/generate/status', methods=['GET'])
 def generate_status_endpoint():
-    if not key_ok(request.args.get("key")):
+    if not key_ok():
         return {"error": "Invalid or missing API key"}, 401
 
     job_id = request.args.get("job_id")
@@ -779,7 +907,7 @@ def generate_status_endpoint():
 # 🆕 /tokens/status endpoint
 @app.route('/tokens/status', methods=['GET'])
 def tokens_status_endpoint():
-    if not key_ok(request.args.get("key")):
+    if not key_ok():
         return {"error": "Invalid or missing API key"}, 401
 
     return jsonify(generator_bridge.get_tokens_status())
@@ -788,13 +916,15 @@ def tokens_status_endpoint():
 # 🆕 /remain endpoint
 @app.route('/remain', methods=['GET'])
 def remain_info():
-    global used_count
+    if not key_ok():
+        return {"error": "Invalid or missing API key"}, 401
 
-    remaining = max(daily_limit - used_count, 0)
+    used = UsageTracker.get_used_count()
+    remaining = max(daily_limit - used, 0)
     data = {
         "daily_limit": daily_limit,
         "remaining": remaining,
-        "used": used_count,
+        "used": used,
         "reset_info": "4:00 AM IST"
     }
     return jsonify(data)

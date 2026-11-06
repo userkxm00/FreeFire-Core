@@ -1,186 +1,147 @@
-# 🎮 ARAFAT-LIKE-UPDATED: الشرح والتوثيق الشامل للمشروع (النسخة المدمجة)
+# 🎮 FreeFire-Core: خادم اللايكات ومولد الحسابات المتكامل
 
-> **دليل توثيقي شامل وتفصيلي** تم تحديثه بعد إتمام عملية الدمج الكاملة بين **نظام اللايكات** و**مولد الحسابات (TSun)** بنجاح مع الحفاظ على الكود الأصلي في نسخة احتياطية آمنة.
+> **مستودع احترافي ونظيف** يجمع بين نظام زيادة لايكات فري فاير (Like API) ومحرك إدارة الحسابات والتوكنات، مع لوحة تحكم ويب تفاعلية، وتحقق صارم من المدخلات، واختبارات آلية، ومطابقة معايير الأمان.
 
 ---
 
-## 📌 1. نظرة عامة على النظام المدمج (Unified System Overview)
+## 📌 1. نظرة عامة (Overview)
 
-أصبح المشروع الآن نظاماً متكاملاً (All-in-One Service):
+المشروع عبارة عن منصة متكاملة:
 1. **خادم REST API (Flask)**:
    - يدير طلبات زيادة اللايكات عبر `GET /like`.
-   - محمي بمفتاح أمان `?key=@ARAFAT_FLEX`.
-   - يتضمن ميزة **التوليد الذاتي عند النقص (Auto-Refill)**: إذا كانت التوكنات لأي سيرفر أقل من الحد المطلوب (مثلاً أقل من 5 توكنات)، يقوم الخادم تلقائياً باستدعاء المولد في الخلفية لتسجيل حسابات جديدة واستخراج توكناتها وتغذية السيرفر فوراً.
-2. **محرك توليد التوكنات عند الطلب (`/generate`)**:
-   - نقطة نهاية برمجية تمكنك من توليد 10 إلى 100 توكن لأي سيرفر بطلب بسيط:
-     - توليد متزامن (مباشر) أو غير متزامن في الخلفية (`async=true`).
-     - نقطة نهاية لمتابعة حالة التوليد: `/generate/status?job_id=...`.
-3. **مراقبة التوكنات (`/tokens/status`)**:
-   - نقطة نهاية لمعرفة رصيد التوكنات المتوفرة في جميع السيرفرات (BD, IND, BR, ME, ID, CIS, إلخ).
-4. **جسر التكامل (`generator_bridge.py`)**:
-   - وحدة برمجية وسيطة تربط بين خادم اللايكات ومحرك `TSun-FF-Guest-Generator-main` مع دعم صيغتي التوكن (`token` و `jwt_token`) بدون أي تعارض.
-5. **النسخة الاحتياطية الآمنة (`_backup_clean/`)**:
-   - نسخة احتياطية كاملة ونظيفة من جميع الملفات والأكواد الأصلية قبل الدمج لضمان عدم ضياع أي كود.
+   - محمي بمفتاح أمان يدعم:
+     - Header: `X-API-Key: YOUR_KEY`
+     - Header: `Authorization: Bearer YOUR_KEY`
+     - Query: `?key=YOUR_KEY`
+   - تحقق صارم من صحة معرف اللاعب (UID) وصيغة التوكنات (JWT Format).
+   - عداد استخدام يومي محمي بـ Thread-Lock ومحفوظ باستمرار في `usage_state.json` مع إعادة تعيين تلقائية كل 24 ساعة.
+2. **لوحة تحكم تفاعلية (Web Dashboard)**:
+   - متاحة مباشرة عبر المتصفح على `http://127.0.0.1:5000/`.
+   - واجهة داكنة متطورة تمكنك من إرسال اللايكات، لصق التوكنات وحفظها، ومتابعة رصيد كل سيرفر.
+3. **محرك إدارة التوكنات والجسر (`generator_bridge.py`)**:
+   - يدعم استخراج التوكنات، وحفظها تلقائياً بدون تعارض في المفاتيح (`token` و `jwt_token`).
+   - تنظيف تلقائي للذاكرة (TTL) لمنع تسريب الذاكرة في المهام الطويلة.
+4. **حزمة اختبارات آلية (`tests/test_suite.py`)**:
+   - تغطي التحقق من الأمان، فك وتشفير الـ Protobuf، والمسارات البرمجية بنسبة نجاح 100%.
 
 ---
 
-## 🗂️ 2. شجرة وهيكلة الملفات بعد الدمج
+## 🗂️ 2. هيكلة الملفات
 
 ```text
-ARAFAT-LIKE-UPDATED/
+FreeFire-Core/
 │
-├── 📁 _backup_clean/               # 🛡️ نسخة احتياطية كاملة من المشروع الأصلي قبل التعديل
+├── 📄 app.py                       # السيرفر الرئيسي للـ Like API (مؤمّن ومحدّث)
+├── 📄 generator_bridge.py          # الجسر البرمجي بين المولد والـ API
+├── 📄 push_to_github.bat           # سكربت رفع التحديثات التلقائي لـ GitHub
+├── 📄 index.py & wsgi.py           # نقاط تشغيل الإنتاج و WSGI
+├── 📄 vercel.json                  # إعدادات النشر السحابي (Python 3.11 Runtime)
+├── 📄 requirements.txt             # متطلبات المشروع بإصدارات محددة ومثبتة
+├── 📄 usage_state.json             # ملف حفظ عداد الاستخدام اليومي المستمر
 │
-├── 📄 app.py                       # السيرفر الرئيسي للـ Like API (محدث بنقاط النهاية والتوليد التلقائي)
-├── 📄 generator_bridge.py          # ⚡ الجسر البرمجي الرابط بين محرك TSun والـ API
-├── 📄 index.py                     # نقطة دخول Vercel Serverless
-├── 📄 wsgi.py                      # نقطة تشغيل WSGI للإنتاج
-├── 📄 vercel.json                  # إعدادات النشر السحابي
-├── 📄 requirements.txt             # متطلبات المشروع الموحدة (Flask, aiohttp, requests, crypto, protobuf, etc.)
+├── 📁 tests/                       # حزمة الاختبارات الآلية
+│   └── 📄 test_suite.py            # اختبارات الوحدة والتحقق من الأمان
 │
-├── 📦 ملفات التوكنات المباشرة:
-│   ├── 📄 token_bd.json            # توكنات سيرفر بنغلاديش (BD)
-│   ├── 📄 token_ind.json           # توكنات سيرفر الهند (IND)
-│   └── 📄 token_br.json            # توكنات سيرفر البرازيل وأمريكا (BR / US / SAC)
+├── 📦 ملفات التوكنات:
+│   ├── 📄 token_me.json            # سيرفر الشرق الأوسط (ME)
+│   ├── 📄 token_bd.json            # سيرفر بنغلاديش (BD)
+│   ├── 📄 token_ind.json           # سيرفر الهند (IND)
+│   └── 📄 token_br.json            # سيرفر البرازيل وأمريكا (BR / US / SAC)
 │
-├── 📦 Protobuf Modules (تشفير وفك حزم البيانات):
+├── 📦 Protobuf Modules:
 │   ├── 📄 like_pb2.py              # حزمة إرسال اللايك (UID + Region)
 │   ├── 📄 uid_generator_pb2.py     # حزمة استعلام معلومات اللاعب
 │   └── 📄 visit_count_pb2.py       # حزمة قراءة بيانات البروفايل (الاسم، المستوى، اللايكات)
 │
 └── 📁 TSun-FF-Guest-Generator-main/ # محرك التوليد وكشف الحسابات النادرة
-    ├── 📁 config/settings.py       # الإعدادات العامة ومفاتيح Garena
-    ├── 📁 core/ (api.py, crypto.py, generator.py)
-    ├── 📁 features/ (rarity.py, couples.py)
-    ├── 📁 storage/file_ops.py
-    └── 📁 TSun-Studio/             # مجلد حفظ الحسابات والتوكنات والنادرة
 ```
+
+> **ملاحظة بخصوص النسخة الاحتياطية:** مجلد النسخة الاحتياطية `_backup_clean/` محفوظ محلياً على جهاز المطور لضمان سلامة الكود، وهو مستثنى في `.gitignore` للحفاظ على نظافة وحجم المستودع العام على GitHub.
 
 ---
 
 ## 🌐 3. واجهات وبرمجة الـ API (Endpoints Reference)
 
-جميع الطلبات المحمية تتطلب تمرير المفتاح: `?key=@ARAFAT_FLEX` (أو المفتاح الذي تحدده في متغير البيئة `API_KEY`).
-
-### 1) إرسال اللايكات مع التوليد الذاتي (`GET /like`)
+### 1) إرسال اللايكات (`GET /like`)
 * **الرابط:**
   ```text
-  GET /like?uid=123456789&region=BD&key=@ARAFAT_FLEX
+  GET /like?uid=12747380350&region=ME
+  Headers: X-API-Key: YOUR_KEY
   ```
-* **كيف يعمل:**
-  1. يفحص توكنات السيرفر (`region`).
-  2. إذا كان عدد التوكنات منخفضاً، يُشغّل التوليد التلقائي فوراً في الخلفية.
-  3. يرسل طلبات متوازية (`aiohttp`) إلى سيرفر اللعبة الرسمي.
-  4. يُرجع النتيجة بتنسيق JSON:
-  ```json
-  {
-    "LikesGivenByAPI": 15,
-    "LikesafterCommand": 215,
-    "LikesbeforeCommand": 200,
-    "PlayerNickname": "PlayerName",
-    "Level": 55,
-    "Region": "BD",
-    "UID": 123456789,
-    "status": 1,
-    "tokens_used": 15,
-    "daily_limit": 30,
-    "used": 1,
-    "remaining": 29
-  }
-  ```
+* **التحقق:**
+  - `uid`: يجب أن يكون رقماً بين 7 و 15 خانة.
+  - `region`: يجب أن يكون من السيرفرات المعتمدة (ME, BD, IND, BR, SAC, ID, VN, TH, PK, CIS, SG, TW).
 
 ---
 
-### 2) توليد التوكنات عند الطلب (`GET` أو `POST /generate`)
-* **الرابط (مباشر / Synchronous):**
-  ```text
-  GET /generate?region=BD&count=10&threads=3&key=@ARAFAT_FLEX
-  ```
-* **الرابط (في الخلفية / Asynchronous):**
-  ```text
-  GET /generate?region=BD&count=25&async=true&key=@ARAFAT_FLEX
-  ```
-* **الرد (في حالة async=true):**
-  ```json
-  {
-    "status": "queued",
-    "job_id": "job_BD_1730849200",
-    "region": "BD",
-    "target": 25,
-    "check_status_url": "/generate/status?job_id=job_BD_1730849200&key=@ARAFAT_FLEX"
-  }
-  ```
-
----
-
-### 3) فحص حالة مهمة التوليد (`GET /generate/status`)
+### 2) إضافة توكنات مباشرة (`POST /tokens/add`)
 * **الرابط:**
   ```text
-  GET /generate/status?job_id=job_BD_1730849200&key=@ARAFAT_FLEX
+  POST /tokens/add
+  Headers: X-API-Key: YOUR_KEY
+  Content-Type: application/json
   ```
-* **الرد:**
+* **Body:**
   ```json
   {
-    "job_id": "job_BD_1730849200",
-    "region": "BD",
-    "target": 25,
-    "completed": 18,
-    "status": "running",
-    "start_time": "2026-11-05 15:45:00"
+    "region": "ME",
+    "tokens": "eyJhbGciOiJIUzI1NiJ9..."
   }
   ```
+* **التحقق:** يتم التحقق تلقائياً من بنية الـ JWT (ثلاثة أجزاء مفصولة بنقاط تبدأ بـ `ey`). أي نص عشوائي يُرفض فوراً بـ 400 Bad Request.
 
 ---
 
-### 4) فحص رصيد التوكنات بجميع السيرفرات (`GET /tokens/status`)
+### 3) توليد التوكنات (`GET` أو `POST /generate`)
 * **الرابط:**
   ```text
-  GET /tokens/status?key=@ARAFAT_FLEX
+  POST /generate
+  Headers: X-API-Key: YOUR_KEY
+  Body: {"region": "ME", "count": 10, "async": true}
   ```
-* **الرد:**
-  ```json
-  {
-    "regions": {
-      "BD": { "valid_tokens": 25, "file": "token_bd.json" },
-      "IND": { "valid_tokens": 10, "file": "token_ind.json" },
-      "BR": { "valid_tokens": 5, "file": "token_br.json" },
-      "ME": { "valid_tokens": 0, "file": "token_me.json" }
-    },
-    "total_tokens_across_all": 40
-  }
+* **الأمان:** لا يتم تسريب مفتاح الـ API في رابط `check_status_url`.
+
+---
+
+### 4) فحص رصيد التوكنات (`GET /tokens/status`)
+* **الرابط:**
+  ```text
+  GET /tokens/status
+  Headers: X-API-Key: YOUR_KEY
   ```
 
 ---
 
-### 5) فحص الحصة اليومية المتبقية (`GET /remain`)
+### 5) فحص الحصة اليومية (`GET /remain`)
 * **الرابط:**
   ```text
   GET /remain
-  ```
-* **الرد:**
-  ```json
-  {
-    "daily_limit": 30,
-    "remaining": 29,
-    "used": 1,
-    "reset_info": "4:00 AM IST"
-  }
+  Headers: X-API-Key: YOUR_KEY
   ```
 
 ---
 
-## 🚀 4. طريقة التشغيل
+## 🧪 4. تشغيل الاختبارات الآلية (Running Unit Tests)
 
-### تشغيل السيرفر محلياً:
+لتشغيل حزمة الاختبارات الآلية والتأكد من سلامة جميع المكونات:
+```powershell
+py tests/test_suite.py
+```
+النتيجة المتوقعة:
+```text
+...........
+----------------------------------------------------------------------
+Ran 11 tests in 0.038s
+
+OK
+```
+
+---
+
+## 🚀 5. تشغيل السيرفر
+
 ```powershell
 py app.py
 ```
-سيبدأ السيرفر فوراً على:
+ثم افتح لوحة التحكم في المتصفح:
 `http://127.0.0.1:5000`
-
----
-
-## 🛡️ 5. الحماية وضمان سلامة الكود
-* تم حفظ النسخة الأصلية بالكامل في مجلد: **`_backup_clean/`**.
-* لم يتم حذف أي ملف من ملفات `TSun-FF-Guest-Generator-main`.
-* تم دعم كلا المفتاحين (`token` و `jwt_token`) لضمان عدم حدوث أي خطأ في قراءة ملفات JSON.
