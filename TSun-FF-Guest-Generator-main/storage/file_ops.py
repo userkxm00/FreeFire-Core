@@ -59,6 +59,7 @@ def save_normal_account(account_data: dict, region: str, is_ghost: bool = False)
     Returns True if the account was newly added, False if it already existed.
     """
     try:
+        settings.ensure_directories_exist()
         if is_ghost:
             filepath = os.path.join(settings.GHOST_ACCOUNTS_FOLDER, "ghost.json")
         else:
@@ -66,7 +67,7 @@ def save_normal_account(account_data: dict, region: str, is_ghost: bool = False)
 
         entry = {
             "uid":          account_data["uid"],
-            "password":     account_data["password"],
+            "password":     "[REDACTED]" if not os.getenv("SAVE_PLAINTEXT_PASSWORDS") else account_data.get("password", ""),
             "account_id":   account_data.get("account_id", "N/A"),
             "name":         account_data["name"],
             "region":       "TSun" if is_ghost else region,
@@ -99,6 +100,7 @@ def save_jwt_token(
     Returns True if newly added, False if already present.
     """
     try:
+        settings.ensure_directories_exist()
         if is_ghost:
             filepath = os.path.join(settings.GHOST_FOLDER, "tokens-ghost.json")
         else:
@@ -109,7 +111,7 @@ def save_jwt_token(
             "account_id": account_data.get("account_id", "N/A"),
             "jwt_token":  jwt_token,
             "name":       account_data["name"],
-            "password":   account_data["password"],
+            "password":   "[REDACTED]" if not os.getenv("SAVE_PLAINTEXT_PASSWORDS") else account_data.get("password", ""),
             "date_time":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "region":     "TSun" if is_ghost else region,
             "thread_id":  account_data.get("thread_id", "N/A"),
@@ -141,6 +143,7 @@ def save_rare_account(
     Returns True if newly added, False if already present.
     """
     try:
+        settings.ensure_directories_exist()
         if is_ghost:
             filepath = os.path.join(settings.GHOST_RARE_FOLDER, "rare-ghost.json")
         else:
@@ -149,7 +152,7 @@ def save_rare_account(
 
         entry = {
             "uid":             account_data["uid"],
-            "password":        account_data["password"],
+            "password":        "[REDACTED]" if not os.getenv("SAVE_PLAINTEXT_PASSWORDS") else account_data.get("password", ""),
             "account_id":      account_data.get("account_id", "N/A"),
             "name":            account_data["name"],
             "region":          "TSun" if is_ghost else account_data.get("region", "UNKNOWN"),
@@ -186,6 +189,7 @@ def save_couples_account(
     Returns True if newly added, False if already present.
     """
     try:
+        settings.ensure_directories_exist()
         if is_ghost:
             filepath = os.path.join(settings.GHOST_COUPLES_FOLDER, "couples-ghost.json")
         else:
@@ -197,14 +201,14 @@ def save_couples_account(
             "couple_id": couple_id,
             "account1": {
                 "uid":        account1["uid"],
-                "password":   account1["password"],
+                "password":   "[REDACTED]" if not os.getenv("SAVE_PLAINTEXT_PASSWORDS") else account1.get("password", ""),
                 "account_id": account1.get("account_id", "N/A"),
                 "name":       account1["name"],
                 "thread_id":  account1.get("thread_id", "N/A"),
             },
             "account2": {
                 "uid":        account2["uid"],
-                "password":   account2["password"],
+                "password":   "[REDACTED]" if not os.getenv("SAVE_PLAINTEXT_PASSWORDS") else account2.get("password", ""),
                 "account_id": account2.get("account_id", "N/A"),
                 "name":       account2["name"],
                 "thread_id":  account2.get("thread_id", "N/A"),

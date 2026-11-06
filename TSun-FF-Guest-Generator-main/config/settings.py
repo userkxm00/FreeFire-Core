@@ -25,6 +25,9 @@ RARITY_SCORE_THRESHOLD: int = 3
 
 LOCK = threading.Lock()
 
+# ── Network & SSL Verification ────────────────────────────────────────────────
+VERIFY_SSL: bool = os.getenv("VERIFY_SSL", "true").lower() in ("1", "true", "yes")
+
 # ── Credentials / Keys ────────────────────────────────────────────────────────
 
 _HEX_KEY = "32656534343831396539623435393838343531343130363762323831363231383734643064356437616639643866376530306331653534373135623764316533"
@@ -80,13 +83,14 @@ GHOST_ACCOUNTS_FOLDER   = os.path.join(GHOST_FOLDER, "ACCOUNTS")
 GHOST_RARE_FOLDER       = os.path.join(GHOST_FOLDER, "RAREACCOUNT")
 GHOST_COUPLES_FOLDER    = os.path.join(GHOST_FOLDER, "COUPLESACCOUNT")
 
-# Create all required directories on import
-for _d in [
-    BASE_FOLDER, TOKENS_FOLDER, ACCOUNTS_FOLDER, RARE_ACCOUNTS_FOLDER,
-    COUPLES_ACCOUNTS_FOLDER, GHOST_FOLDER, GHOST_ACCOUNTS_FOLDER,
-    GHOST_RARE_FOLDER, GHOST_COUPLES_FOLDER,
-]:
-    os.makedirs(_d, exist_ok=True)
+def ensure_directories_exist() -> None:
+    """Create all required directories lazily on demand rather than at import time."""
+    for _d in [
+        BASE_FOLDER, TOKENS_FOLDER, ACCOUNTS_FOLDER, RARE_ACCOUNTS_FOLDER,
+        COUPLES_ACCOUNTS_FOLDER, GHOST_FOLDER, GHOST_ACCOUNTS_FOLDER,
+        GHOST_RARE_FOLDER, GHOST_COUPLES_FOLDER,
+    ]:
+        os.makedirs(_d, exist_ok=True)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

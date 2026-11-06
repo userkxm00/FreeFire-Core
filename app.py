@@ -8,6 +8,8 @@ import binascii
 import aiohttp
 import requests
 import json
+import base64
+import time
 import like_pb2
 import uid_generator_pb2
 import visit_count_pb2
@@ -21,9 +23,19 @@ import generator_bridge
 
 app = Flask(__name__)
 
-# 🔐 Security: Configurable API Key
-DEFAULT_KEY = "@ARAFAT_FLEX"
-API_KEY = os.getenv("API_KEY", DEFAULT_KEY)
+# 🔐 Security: Require explicit API_KEY configuration. No default hardcoded key.
+API_KEY = os.getenv("API_KEY")
+
+def require_api_key_configured():
+    """Ensure API_KEY is set in environment. Raise RuntimeError if missing."""
+    key = os.getenv("API_KEY")
+    if not key or not str(key).strip():
+        raise RuntimeError(
+            "CRITICAL SECURITY CONFIGURATION ERROR: Environment variable 'API_KEY' is not set! "
+            "FreeFire-Core refuses to start with an insecure or missing key. "
+            "Please configure API_KEY in your environment or .env file before running."
+        )
+    return str(key).strip()
 
 # 🌐 Configurable SSL verification (enabled by default for security)
 VERIFY_SSL = os.getenv("VERIFY_SSL", "true").lower() in {"1", "true", "yes"}
@@ -45,27 +57,41 @@ daily_limit = 30
 
 
 class UsageTracker:
+    """
+    Thread-safe, process-level daily usage tracker with atomic file writes.
+    Note: For distributed multi-instance or serverless deployments (Vercel, AWS Lambda),
+    an external state store such as Redis or a database should be used.
+    """
     @staticmethod
     def _load_state():
         today_str = str(date.today())
-        if os.path.exists(STATE_FILE):
-            try:
-                with open(STATE_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if data.get("date") == today_str:
-                        return data.get("used_count", 0)
-            except Exception:
-                pass
-        return 0
+        if not os.path.exists(STATE_FILE):
+            return 0
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and data.get("date") == today_str:
+                    return int(data.get("used_count", 0))
+                return 0
+        except (json.JSONDecodeError, IOError, ValueError) as exc:
+            app.logger.warning(f"Error reading usage state file ({exc}), returning 0.")
+            return 0
 
     @staticmethod
     def _save_state(count):
         today_str = str(date.today())
+        tmp_file = STATE_FILE + f".tmp_{os.getpid()}_{threading.get_ident()}"
         try:
-            with open(STATE_FILE, "w", encoding="utf-8") as f:
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump({"date": today_str, "used_count": count}, f)
-        except Exception:
-            pass
+            os.replace(tmp_file, STATE_FILE)
+        except (IOError, OSError) as exc:
+            app.logger.error(f"Failed to atomically persist usage state: {exc}")
+            if os.path.exists(tmp_file):
+                try:
+                    os.remove(tmp_file)
+                except OSError:
+                    pass
 
     @classmethod
     def get_used_count(cls):
@@ -83,11 +109,18 @@ class UsageTracker:
 def key_ok(provided_key=None):
     """
     Validate API key from multiple sources:
-    1. Header 'X-API-Key'
-    2. Header 'Authorization: Bearer <key>'
-    3. Query parameter 'key'
-    4. JSON body 'key'
+    1. Direct argument
+    2. Header 'X-API-Key'
+    3. Header 'Authorization: Bearer <key>'
+    4. Query parameter 'key'
+    5. JSON body 'key'
+    Fails closed if API_KEY is not configured in the environment.
     """
+    expected = os.getenv("API_KEY")
+    if not expected or not str(expected).strip():
+        app.logger.warning("Rejecting request: API_KEY is not configured in environment.")
+        return False
+
     key = provided_key
     if not key:
         key = request.headers.get("X-API-Key")
@@ -100,7 +133,7 @@ def key_ok(provided_key=None):
     if not key and request.is_json:
         key = (request.get_json(silent=True) or {}).get("key")
 
-    return key is not None and hmac.compare_digest(str(key).strip(), API_KEY)
+    return key is not None and hmac.compare_digest(str(key).strip(), str(expected).strip())
 
 
 def validate_uid(uid_str):
@@ -111,13 +144,45 @@ def validate_uid(uid_str):
     return 100_000 <= val <= 999_999_999_999_999
 
 
-def validate_jwt_format(token_str):
-    """Validate standard 3-part base64url JWT structure."""
+def check_jwt_structure(token_str):
+    """
+    Syntax check: Verify that token consists of 3 dot-separated segments,
+    starts with base64url 'ey' (JSON '{'), and contains valid length.
+    """
     if not token_str or not isinstance(token_str, str):
         return False
-    token_str = token_str.strip()
-    parts = token_str.split(".")
-    return len(parts) == 3 and parts[0].startswith("ey") and len(token_str) > 20
+    parts = token_str.strip().split(".")
+    return len(parts) == 3 and parts[0].startswith("ey") and len(token_str.strip()) > 20
+
+
+def inspect_jwt_payload(token_str):
+    """
+    Offline Claims & Expiration Inspection.
+    Decodes the JWT payload segment (without signature verification, which requires
+    Garena's private/public key) and checks expiration timestamp ('exp') if present.
+    Returns (is_valid, claims, message).
+    """
+    if not check_jwt_structure(token_str):
+        return False, {}, "Invalid JWT structure (must have 3 segments starting with ey)"
+
+    parts = token_str.strip().split(".")
+    payload_b64 = parts[1]
+    padding = 4 - (len(payload_b64) % 4)
+    if padding != 4:
+        payload_b64 += "=" * padding
+
+    try:
+        decoded_bytes = base64.urlsafe_b64decode(payload_b64)
+        claims = json.loads(decoded_bytes)
+        exp = claims.get("exp")
+        if exp is not None:
+            now_ts = int(time.time())
+            if exp < now_ts:
+                return False, claims, f"Token expired at timestamp {exp} (now: {now_ts})"
+
+        return True, claims, "Valid structure and non-expired"
+    except Exception as exc:
+        return False, {}, f"Failed to decode JWT payload: {exc}"
 
 
 def get_token_str(t):
@@ -132,13 +197,12 @@ def get_token_str(t):
 def load_tokens(region, auto_refill=True):
     """
     Load tokens for a region with optional automatic refill.
-    Supports token, jwt_token, and plain string formats.
+    Validates token structure and expiration before including.
     """
     try:
         current_count = generator_bridge.count_valid_tokens(region)
 
         if auto_refill and AUTO_REFILL_ENABLED and current_count < MIN_TOKEN_THRESHOLD:
-            # Trigger background generation non-blockingly so the request doesn't hang
             def _bg_refill():
                 try:
                     generator_bridge.ensure_tokens_available(
@@ -154,7 +218,8 @@ def load_tokens(region, auto_refill=True):
         valid_tokens = []
         for t in raw_tokens:
             token_str = get_token_str(t)
-            if token_str and validate_jwt_format(token_str):
+            is_valid, _, _ = inspect_jwt_payload(token_str)
+            if is_valid:
                 if isinstance(t, dict):
                     t["token"] = token_str
                     t["jwt_token"] = token_str
@@ -301,13 +366,87 @@ def make_request(encrypt, region, token):
         return None
 
 
-# 🏠 Web UI Dashboard at /
-@app.route('/')
-def home_dashboard():
-    tokens_info = generator_bridge.get_tokens_status()
-    used = UsageTracker.get_used_count()
-    remaining = max(daily_limit - used, 0)
-    html = """<!DOCTYPE html>
+# 🔒 HTML Login Gate (Returned with 401 when unauthenticated)
+LOGIN_GATE_HTML = """<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Authentication Required - FreeFire Core</title>
+    <style>
+        body {
+            background-color: #0d1117;
+            color: #c9d1d9;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            direction: rtl;
+        }
+        .login-box {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            padding: 30px;
+            max-width: 420px;
+            width: 90%;
+            text-align: center;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        }
+        h2 { color: #ff5722; margin-bottom: 12px; font-size: 1.5rem; }
+        p { color: #8b949e; font-size: 0.9rem; margin-bottom: 20px; }
+        input {
+            width: 100%;
+            padding: 12px;
+            background: #090d13;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #f0f6fc;
+            font-size: 1rem;
+            margin-bottom: 16px;
+            box-sizing: border-box;
+            text-align: center;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background: #ff5722;
+            border: none;
+            border-radius: 6px;
+            color: #fff;
+            font-size: 1rem;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        button:hover { background: #f4511e; }
+        .alert {
+            background: #3c1e1e;
+            color: #f85149;
+            border: 1px solid #da3633;
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h2>🔒 تسجيل الدخول المطلوب</h2>
+        <div class="alert">لوحة التحكم محمية. يرجى إدخال مفتاح API Key المصرح به للوصول.</div>
+        <p>يتم التحقق من المفتاح مباشرة على الخادم (Server-side Auth).</p>
+        <form method="GET" action="/">
+            <input type="password" name="key" placeholder="أدخل مفتاح الـ API هنا..." required autofocus>
+            <button type="submit">فتح لوحة التحكم</button>
+        </form>
+    </div>
+</body>
+</html>"""
+
+# 🏠 Web UI Dashboard at / (Only rendered when authenticated)
+DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
     <meta charset="UTF-8">
@@ -449,13 +588,6 @@ def home_dashboard():
             <p>نظام زيادة لايكات فري فاير وإدارة التوكنات المتكامل (OB55)</p>
         </header>
 
-        <div class="card" style="margin-bottom:20px;">
-            <h2>🔑 تسجيل الدخول بالـ API Key</h2>
-            <label>أدخل مفتاحك للتحكم (API Key):</label>
-            <input type="password" id="global_api_key" placeholder="أدخل مفتاح الـ API هنا..." value="">
-            <small style="color:#8b949e;">المفتاح مطلوب لجميع العمليات ولا يتم حفظه في السجلات.</small>
-        </div>
-
         <div class="grid">
             <!-- Card 1: إرسال لايكات -->
             <div class="card">
@@ -551,26 +683,13 @@ def home_dashboard():
     </div>
 
     <script>
-        function getKey() {
-            let key = document.getElementById('global_api_key').value.trim();
-            if (!key) {
-                key = localStorage.getItem('api_key') || '';
-                if (key) document.getElementById('global_api_key').value = key;
-            }
-            if (key) localStorage.setItem('api_key', key);
-            return key;
-        }
+        const CURRENT_KEY = "{{ current_key }}";
 
         async function loadStats() {
-            const key = getKey();
             try {
                 const res = await fetch('/tokens/status', {
-                    headers: key ? {'X-API-Key': key} : {}
+                    headers: {'X-API-Key': CURRENT_KEY}
                 });
-                if (res.status === 401) {
-                    document.getElementById('tokens_tbody').innerHTML = '<tr><td colspan="3" style="color:#f85149;">يرجى إدخال مفتاح API Key بالأعلى أولاً!</td></tr>';
-                    return;
-                }
                 const data = await res.json();
                 const tbody = document.getElementById('tokens_tbody');
                 tbody.innerHTML = '';
@@ -584,7 +703,7 @@ def home_dashboard():
                 }
 
                 const remainRes = await fetch('/remain', {
-                    headers: key ? {'X-API-Key': key} : {}
+                    headers: {'X-API-Key': CURRENT_KEY}
                 });
                 if (remainRes.ok) {
                     const remainData = await remainRes.json();
@@ -598,11 +717,9 @@ def home_dashboard():
         async function sendLikes() {
             const uid = document.getElementById('like_uid').value.trim();
             const region = document.getElementById('like_region').value;
-            const key = getKey();
             const btn = document.getElementById('like_btn');
             const resBox = document.getElementById('like_result');
 
-            if (!key) { alert('يرجى إدخال مفتاح API Key في الأعلى أولاً!'); return; }
             if (!uid) { alert('يرجى إدخال UID اللاعب!'); return; }
 
             btn.disabled = true;
@@ -612,7 +729,7 @@ def home_dashboard():
 
             try {
                 const response = await fetch(`/like?uid=${uid}&region=${region}`, {
-                    headers: {'X-API-Key': key}
+                    headers: {'X-API-Key': CURRENT_KEY}
                 });
                 const json = await response.json();
                 resBox.innerText = JSON.stringify(json, null, 2);
@@ -628,10 +745,8 @@ def home_dashboard():
         async function addTokens() {
             const region = document.getElementById('token_region').value;
             const text = document.getElementById('tokens_text').value.trim();
-            const key = getKey();
             const resBox = document.getElementById('token_add_result');
 
-            if (!key) { alert('يرجى إدخال مفتاح API Key في الأعلى أولاً!'); return; }
             if (!text) { alert('يرجى لصق التوكنات أولاً!'); return; }
             resBox.style.display = 'block';
             resBox.innerText = 'جاري حفظ التوكنات...';
@@ -641,7 +756,7 @@ def home_dashboard():
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'X-API-Key': key
+                        'X-API-Key': CURRENT_KEY
                     },
                     body: JSON.stringify({region: region, tokens: text})
                 });
@@ -657,16 +772,14 @@ def home_dashboard():
         async function generateTokens() {
             const region = document.getElementById('gen_region').value;
             const count = document.getElementById('gen_count').value;
-            const key = getKey();
             const resBox = document.getElementById('gen_result');
 
-            if (!key) { alert('يرجى إدخال مفتاح API Key في الأعلى أولاً!'); return; }
             resBox.style.display = 'block';
             resBox.innerText = 'جاري التوليد... قد يستغرق بضع ثوانٍ...';
 
             try {
                 const response = await fetch(`/generate?region=${region}&count=${count}`, {
-                    headers: {'X-API-Key': key}
+                    headers: {'X-API-Key': CURRENT_KEY}
                 });
                 const json = await response.json();
                 resBox.innerText = JSON.stringify(json, null, 2);
@@ -676,14 +789,21 @@ def home_dashboard():
             }
         }
 
-        window.onload = function() {
-            getKey();
-            loadStats();
-        };
+        window.onload = loadStats;
     </script>
 </body>
 </html>"""
-    return render_template_string(html)
+
+
+# 🏠 Web UI Dashboard Route (Server-Side Authentication Gate)
+@app.route('/', methods=['GET'])
+def home_dashboard():
+    # Enforce server-side authentication: unauthenticated clients receive 401 Login Gate
+    if not key_ok():
+        return render_template_string(LOGIN_GATE_HTML), 401
+
+    key = request.args.get("key") or request.headers.get("X-API-Key") or ""
+    return render_template_string(DASHBOARD_HTML, current_key=key), 200
 
 
 @app.route('/like', methods=['GET'])
@@ -725,7 +845,7 @@ def handle_requests():
             before = make_request(encrypted_uid, region, token)
             if before is None:
                 return {
-                    "error": "Failed to get initial info from Free Fire server. Check if token is valid or server is maintenance.",
+                    "error": "Failed to get initial info from Free Fire server. Check if token is valid or server is in maintenance.",
                     "status": 2,
                     "region": region
                 }, 400
@@ -791,16 +911,22 @@ def add_tokens_endpoint():
 
     raw_input = data.get("tokens") or ""
     entries_to_add = []
+    rejected_count = 0
 
     def _process_candidate(candidate_str):
+        nonlocal rejected_count
         candidate_str = candidate_str.strip().strip('"').strip("'").strip(',')
-        if validate_jwt_format(candidate_str):
+        is_valid, claims, _ = inspect_jwt_payload(candidate_str)
+        if is_valid:
             entries_to_add.append({
                 "token": candidate_str,
                 "jwt_token": candidate_str,
+                "account_id": claims.get("account_id") or claims.get("external_id") or "",
                 "region": region,
                 "date_added": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             })
+        elif candidate_str:
+            rejected_count += 1
 
     if isinstance(raw_input, str):
         raw_input = raw_input.strip()
@@ -821,7 +947,7 @@ def add_tokens_endpoint():
 
     if not entries_to_add:
         return {
-            "error": "No valid JWT tokens found in input. Tokens must follow JWT format (ey... with 3 segments separated by dots)."
+            "error": "No valid non-expired JWT tokens found. Tokens must be 3-part base64url starting with 'ey' and have valid expiration."
         }, 400
 
     added = generator_bridge.append_tokens(region, entries_to_add)
@@ -830,6 +956,7 @@ def add_tokens_endpoint():
         "status": "success",
         "region": region,
         "tokens_added": added,
+        "tokens_rejected": rejected_count,
         "total_available": total
     }), 200
 
@@ -868,7 +995,6 @@ def generate_endpoint():
             name_prefix=name_prefix,
             pass_prefix=pass_prefix,
         )
-        # Note: Do NOT leak API key in check_status_url
         return jsonify({
             "status": "queued",
             "job_id": job_id,
@@ -931,6 +1057,6 @@ def remain_info():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, use_reloader=False)
-    #join for more update :- @arafat_flex
-    #Credit @arafat_flex , @arafat_source , @arafat_ahmed
+    # Refuse to start without API_KEY set
+    require_api_key_configured()
+    app.run(debug=False, use_reloader=False)

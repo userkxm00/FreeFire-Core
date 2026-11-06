@@ -28,9 +28,7 @@ _TSUN_DIR = os.path.join(_CURRENT_DIR, "TSun-FF-Guest-Generator-main")
 if _TSUN_DIR not in sys.path:
     sys.path.insert(0, _TSUN_DIR)
 
-import urllib3
-from urllib3.exceptions import InsecureRequestWarning
-urllib3.disable_warnings(InsecureRequestWarning)
+
 
 # Import TSun core components
 try:

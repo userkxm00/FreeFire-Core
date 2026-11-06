@@ -138,7 +138,7 @@ def register_guest_account(region: str, password_prefix: str) -> Optional[dict]:
             headers=headers_v2,
             data=body_json,
             timeout=30,
-            verify=False,
+            verify=settings.VERIFY_SSL,
         )
         for _ in range(1):
             if response.status_code not in (403, 429):
@@ -149,7 +149,7 @@ def register_guest_account(region: str, password_prefix: str) -> Optional[dict]:
                 headers=headers_v2,
                 data=body_json,
                 timeout=30,
-                verify=False,
+                verify=settings.VERIFY_SSL,
             )
 
         if response.status_code in (403, 429):
@@ -209,7 +209,7 @@ def grant_oauth_token(uid: str, password: str) -> Optional[dict]:
             headers=headers_v2,
             data=body_json,
             timeout=30,
-            verify=False,
+            verify=settings.VERIFY_SSL,
         )
         for _ in range(1):
             if response.status_code not in (403, 429):
@@ -220,7 +220,7 @@ def grant_oauth_token(uid: str, password: str) -> Optional[dict]:
                 headers=headers_v2,
                 data=body_json,
                 timeout=30,
-                verify=False,
+                verify=settings.VERIFY_SSL,
             )
 
         if response.status_code in (403, 429):
@@ -299,7 +299,7 @@ def major_register(
                 "X-Unity-Version": "2018.4.",
             },
             data=encrypted_payload,
-            verify=False,
+            verify=settings.VERIFY_SSL,
             timeout=30,
         )
 
@@ -407,7 +407,7 @@ def major_login(
                 "X-Unity-Version": "2018.4.11f1",
             },
             data=final_payload,
-            verify=False,
+            verify=settings.VERIFY_SSL,
             timeout=30,
         )
 
@@ -451,7 +451,7 @@ def bind_region(region: str, jwt_token: str) -> bool:
                 "X-GA":            "v1 1",
                 "ReleaseVersion":  "OB53",
             },
-            verify=False,
+            verify=settings.VERIFY_SSL,
             timeout=30,
         )
         return response.status_code == 200
