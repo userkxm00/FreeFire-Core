@@ -255,7 +255,7 @@ def check_jwt_structure(token_str):
     return len(parts) == 3 and parts[0].startswith("ey") and len(token_str.strip()) > 20
 
 
-def inspect_jwt_payload(token_str):
+def inspect_jwt_payload(token_str, allow_grace=False):
     """
     Offline Unverified Claims & Expiration Inspection.
     Decodes the JWT payload segment WITHOUT cryptographic signature verification.
@@ -282,7 +282,8 @@ def inspect_jwt_payload(token_str):
         exp = claims.get("exp")
         if exp is not None:
             now_ts = int(time.time())
-            if exp < now_ts:
+            grace_seconds = int(os.getenv("TOKEN_EXPIRY_GRACE_SECONDS", "86400")) if allow_grace else 0
+            if exp + grace_seconds < now_ts:
                 return False, claims, f"Token expired at timestamp {exp} (now: {now_ts})"
 
         return True, claims, "Valid structure and non-expired (signature unverified)"
@@ -323,7 +324,7 @@ def load_tokens(region, auto_refill=True):
         valid_tokens = []
         for t in raw_tokens:
             token_str = get_token_str(t)
-            is_valid, _, _ = inspect_jwt_payload(token_str)
+            is_valid, _, _ = inspect_jwt_payload(token_str, allow_grace=True)
             if is_valid:
                 if isinstance(t, dict):
                     t["token"] = token_str

@@ -33,3 +33,4 @@ jobs:
         VERIFY_SSL: "true"
       run: |
         python tests/test_suite.py
+

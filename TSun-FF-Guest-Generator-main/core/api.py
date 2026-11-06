@@ -288,15 +288,14 @@ def major_register(
             url,
             headers={
                 "Accept-Encoding": "gzip",
-                "Authorization":   "Bearer",
+                "Authorization":   f"Bearer {access_token}",
                 "Connection":      "Keep-Alive",
-                "Content-Type":    "application/x-www-form-urlencoded",
-                "Expect":          "100-continue",
+                "Content-Type":    "application/octet-stream",
                 "Host":            host,
                 "ReleaseVersion":  settings.RELEASE_VERSION,
-                "User-Agent":      "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_I005DA Build/PI)",
+                "User-Agent":      "Dalvik/2.1.0 (Linux; U; Android 13; A063 Build/TKQ1.221220.001)",
                 "X-GA":            "v1 1",
-                "X-Unity-Version": "2018.4.",
+                "X-Unity-Version": "2018.4.11f1",
             },
             data=encrypted_payload,
             verify=settings.VERIFY_SSL,
@@ -338,7 +337,7 @@ def major_register(
 
 # Hard-coded login payload template (binary protobuf blob)
 _LOGIN_PAYLOAD_PARTS = [
-    b'\x1a\x132025-08-30 05:19:21"\tfree fire(\x01:\x081.114.13B2Android OS 9 / API-28'
+    b'\x1a\x132026-11-05 05:19:21"\tfree fire(\x01:\x081.132.8\x422Android OS 9 / API-28'
     b' (PI/rel.cjw.20220518.114133)J\x08HandheldR\nATM MobilsZ\x04WIFI`\xb6\nh\xee\x05'
     b'r\x03300z\x1fARMv7 VFPv3 NEON VMH | 2400 | 2\x80\x01\xc9\x0f\x8a\x01\x0fAdreno (TM) 640'
     b'\x92\x01\rOpenGL ES 3.2\x9a\x01+Google|dfa4ab4b-9dc4-454e-8065-e70c733fa53f'
@@ -352,7 +351,7 @@ _LOGIN_PAYLOAD_PARTS = [
     b'\x90\x04\xe7\xf0\x01\x98\x04\xa8\x81\x02\xc8\x04\x01\xd2\x04=/data/app/'
     b'com.dts.freefireth-PdeDnOilCSFn37p1AH_FLg==/lib/arm\xe0\x04\x01\xea\x04_'
     b'2087f61c19f57f2af4e7feff0b24d9d9|/data/app/com.dts.freefireth-PdeDnOilCSFn37p1AH_FLg=='
-    b'/base.apk\xf0\x04\x03\xf8\x04\x01\x8a\x05\x0232\x9a\x05\n2019118692\xb2\x05'
+    b'/base.apk\xf0\x04\x03\xf8\x04\x01\x8a\x05\x0232\x9a\x05\n2019121229\xb2\x05'
     b'\tOpenGLES2\xb8\x05\xff\x7f\xc0\x05\x04\xe0\x05\xf3F\xea\x05\x07android'
     b'\xf2\x05pKqsHT5ZLWrYljNb5Vqh//yFRlaPHSO9NWSQsVvOmdhEEn7W+VHNUK+Q+fduA3pt'
     b'NrGB0Ll0LRz3WW0jOwesLj6aiU7sZ40p8BfUE/FI/jzSTwRe2\xf8\x05\xfb\xe4\x06'

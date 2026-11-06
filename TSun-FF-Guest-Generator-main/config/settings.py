@@ -31,7 +31,7 @@ VERIFY_SSL: bool = os.getenv("VERIFY_SSL", "true").lower() in ("1", "true", "yes
 # ── Version & Release Header ──────────────────────────────────────────────────
 # NOTE: TSun's internal binary protobuf payload was built for OB53 (1.114.13).
 # Modifying this header alone does NOT guarantee protocol compatibility with OB55+.
-RELEASE_VERSION: str = os.getenv("RELEASE_VERSION", "OB53")
+RELEASE_VERSION: str = os.getenv("RELEASE_VERSION", "OB55")
 
 # ── Credentials / Keys ────────────────────────────────────────────────────────
 
