@@ -67,3 +67,4 @@ if __name__ == "__main__":
         try: os.remove("run_send_likes.py")
         except Exception: pass
     asyncio.run(main())
+
