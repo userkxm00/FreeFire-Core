@@ -8,3 +8,6 @@ FF LIIKE/
 .idea/
 
 usage_state.json
+.env
+*.env
+
